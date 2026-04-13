@@ -117,7 +117,7 @@ let b = map(handDistance, 20, 500, 255, 150, true);
 // neue Partikel erzeugen
 if (frameCount % 15 === 0) {
 for (let i = 0; i < spawnCount; i++) {
-  particles.push(new Particle(centerX, centerY, particleSize, r, g, b));
+  particles.push(new Particle(centerX, centerY, particleSize));
 }
 }
 
