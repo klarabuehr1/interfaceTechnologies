@@ -110,10 +110,14 @@ let centerY = (leftHand.y + rightHand.y) / 2;
 let spawnCount = int(map(handDistance, 20, 500, 1, 20, true));
 let particleSize = map(handDistance, 20, 500, 1, 70, true);
 
+let r = map(handDistance, 20, 500, 0, 255, true);
+let g = map(handDistance, 20, 500, 100, 120, true);
+let b = map(handDistance, 20, 500, 255, 150, true);
+
 // neue Partikel erzeugen
 if (frameCount % 15 === 0) {
 for (let i = 0; i < spawnCount; i++) {
-  particles.push(new Particle(centerX, centerY, particleSize));
+  particles.push(new Particle(centerX, centerY, particleSize, r, g, b));
 }
 }
 
@@ -133,7 +137,7 @@ for (let i = 0; i < spawnCount; i++) {
 
 
 class Particle {
-  constructor(x, y, size) {
+  constructor(x, y, size, r, g, b) {
     this.x = x;
     this.y = y;
     this.vx = random(-2, 2);
@@ -142,9 +146,9 @@ class Particle {
     this.transparency = 255;
 
       //Farbe der Partikel
-      this.r = random(0,255);
-      this.g = random(0,255);
-      this.b = random(0,255);
+      this.r = r;
+      this.g = g;
+      this.b = b;
   }
 
 
