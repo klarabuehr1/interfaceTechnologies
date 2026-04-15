@@ -176,7 +176,7 @@ function drawPixelatedVideo() {
   background(0);
   video.loadPixels();
 
-  let stepSize = 15;
+  let stepSize = 10;
 
   for (let y = 0; y < height; y += stepSize) {
     for (let x = 0; x < width; x += stepSize) {
