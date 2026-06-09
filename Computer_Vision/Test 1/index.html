@@ -1,0 +1,161 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Body Pose Detection</title>
+    <link rel="stylesheet" href="css/style.css" />
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/p5.js/1.9.4/p5.min.js"></script>
+    <script src="https://unpkg.com/ml5@1/dist/ml5.min.js"></script>
+  </head>
+  <body>
+    <script>
+      let video;
+      let handPose;
+      let hands = [];
+
+      // Rechen detection state
+      let rechenDetected = false;
+
+      function preload() {
+        // Load the handPose model
+        handPose = ml5.handPose();
+      }
+
+      function setup() {
+        createCanvas(640, 480);
+
+        // Create the video and hide it
+        video = createCapture(VIDEO);
+        video.size(640, 480);
+        video.hide();
+
+        // Start detecting hands in the webcam video
+        handPose.detectStart(video, gotHands);
+      }
+
+      function getHandOrientation(hand) {
+        let wrist    = hand.keypoints[0];
+        let indexMCP = hand.keypoints[5];
+        let pinkyMCP = hand.keypoints[17];
+
+        // 2D cross product (z-component)
+        let crossZ = (indexMCP.x - wrist.x) * (pinkyMCP.y - wrist.y)
+                   - (indexMCP.y - wrist.y) * (pinkyMCP.x - wrist.x);
+
+        // Webcam is mirrored → Left/Right is inverted
+        let isRight = hand.handedness === "Left";
+
+        if (isRight) {
+          return crossZ > 0 ? "Außenfläche" : "Innenfläche";
+        } else {
+          return crossZ < 0 ? "Außenfläche" : "Innenfläche";
+        }
+      }
+
+      // --- Rechen detection via orange pixel count ---
+      function detectRechen() {
+        video.loadPixels();
+        let orangeCount = 0;
+
+        // Sample every 4th pixel for performance
+        for (let i = 0; i < video.pixels.length; i += 16) {
+          let r = video.pixels[i];
+          let g = video.pixels[i + 1];
+          let b = video.pixels[i + 2];
+
+          // Orange color filter
+          if (r > 180 && g > 60 && g < 160 && b < 80 && r > g * 1.5) {
+            orangeCount++;
+          }
+        }
+
+        // Rechen detected if at least 5 orange pixels found (adjust if needed)
+        rechenDetected = orangeCount >= 5;
+      }
+
+      function draw() {
+        // Draw the webcam video
+        image(video, 0, 0, width, height);
+
+        // Run rechen detection every frame
+        detectRechen();
+
+        // Draw detected orange marker if rechen is found
+        if (rechenDetected) {
+          noFill();
+          stroke(255, 165, 0);
+          strokeWeight(3);
+          rect(width - 44, 44, 34, 34, 4);
+          fill(255, 165, 0);
+          noStroke();
+          textSize(22);
+          textAlign(CENTER, CENTER);
+          text("🪣", width - 27, 61); // small orange indicator in corner
+        }
+
+        // Draw keypoints and connections for each detected hand
+        for (let i = 0; i < hands.length; i++) {
+          let hand = hands[i];
+
+          // Draw skeleton connections
+          let connections = handPose.getConnections();
+          for (let j = 0; j < connections.length; j++) {
+            let ptA = hand.keypoints[connections[j][0]];
+            let ptB = hand.keypoints[connections[j][1]];
+            stroke(255, 0, 0);
+            strokeWeight(2);
+            line(ptA.x, ptA.y, ptB.x, ptB.y);
+          }
+
+          // Draw each keypoint
+          for (let j = 0; j < hand.keypoints.length; j++) {
+            let kp = hand.keypoints[j];
+            fill(0, 255, 0);
+            noStroke();
+            circle(kp.x, kp.y, 8);
+          }
+
+          // Show orientation label above the wrist
+          let orientation = getHandOrientation(hand);
+          let wrist = hand.keypoints[0];
+          fill(orientation === "Innenfläche" ? color(0, 180, 255) : color(255, 140, 0));
+          noStroke();
+          rect(wrist.x - 55, wrist.y - 36, 110, 24, 6);
+          fill(255);
+          textSize(14);
+          textAlign(CENTER, CENTER);
+          text(orientation, wrist.x, wrist.y - 24);
+        }
+
+        // Status bar: hands
+        let handsDetected = hands.length > 0;
+        let handText = handsDetected
+          ? "Hand(s) erkannt: " + hands.length
+          : "Keine Hand erkannt";
+
+        noStroke();
+        fill(handsDetected ? color(0, 200, 0, 180) : color(200, 0, 0, 180));
+        rect(0, 0, width, 36);
+        fill(255);
+        textSize(18);
+        textAlign(LEFT, CENTER);
+        text(handText, 12, 18);
+
+        // Status bar: rechen
+        noStroke();
+        fill(rechenDetected ? color(255, 140, 0, 200) : color(80, 80, 80, 180));
+        rect(0, 36, width, 36);
+        fill(255);
+        textSize(18);
+        textAlign(LEFT, CENTER);
+        text(rechenDetected ? "Rechen erkannt" : "Kein Rechen erkannt", 12, 54);
+      }
+
+      // Callback function for when handPose outputs data
+      function gotHands(results) {
+        hands = results;
+      }
+    </script>
+  </body>
+</html>
