@@ -17,6 +17,45 @@
       // Rechen detection state
       let rechenDetected = false;
 
+      // Web Serial API
+      let serialWriter = null;
+      let serialConnected = false;
+
+      // Edge-detection state (nur beim Übergang auslösen)
+      let prevTwoHands = false;
+      let prevRechenDetected = false;
+      const COOLDOWN = 1500; // ms zwischen wiederholten Triggern
+      let lastCPress = -1500;
+      let lastDPress = -1500;
+
+      async function connectSerial() {
+        if (!navigator.serial) {
+          alert('Web Serial API nicht verfügbar. Bitte Chrome oder Edge verwenden.');
+          return;
+        }
+        try {
+          const port = await navigator.serial.requestPort();
+          await port.open({ baudRate: 9600 });
+          const encoder = new TextEncoderStream();
+          encoder.readable.pipeTo(port.writable);
+          serialWriter = encoder.writable.getWriter();
+          serialConnected = true;
+          connectBtn.html('✅ ESP32 verbunden');
+          connectBtn.style('background', '#2a9d2a');
+        } catch (e) {
+          console.error('Serial Verbindung fehlgeschlagen:', e);
+        }
+      }
+
+      async function sendSerial(char) {
+        if (serialWriter) {
+          try { await serialWriter.write(char); }
+          catch (e) { console.error('Senden fehlgeschlagen:', e); }
+        }
+      }
+
+      let connectBtn;
+
       function preload() {
         // Load the handPose model
         handPose = ml5.handPose();
@@ -32,6 +71,18 @@
 
         // Start detecting hands in the webcam video
         handPose.detectStart(video, gotHands);
+
+        // Connect button
+        connectBtn = createButton('🔌 ESP32 verbinden');
+        connectBtn.mousePressed(connectSerial);
+        connectBtn.style('margin-top', '10px');
+        connectBtn.style('padding', '8px 16px');
+        connectBtn.style('font-size', '15px');
+        connectBtn.style('cursor', 'pointer');
+        connectBtn.style('border', 'none');
+        connectBtn.style('border-radius', '6px');
+        connectBtn.style('background', '#444');
+        connectBtn.style('color', '#fff');
       }
 
       function getHandOrientation(hand) {
@@ -56,7 +107,7 @@
       // --- Rechen detection via orange pixel count ---
       function detectRechen() {
         video.loadPixels();
-        let orangeCount = 0;
+        let greenCount = 0;
 
         // Sample every 4th pixel for performance
         for (let i = 0; i < video.pixels.length; i += 16) {
@@ -64,14 +115,14 @@
           let g = video.pixels[i + 1];
           let b = video.pixels[i + 2];
 
-          // Orange color filter
-          if (r > 180 && g > 60 && g < 160 && b < 80 && r > g * 1.5) {
-            orangeCount++;
+          // Green color filter
+          if (g > 100 && g > r * 1.4 && g > b * 1.4 && r < 180 && b < 180) {
+            greenCount++;
           }
         }
 
-        // Rechen detected if at least 10 orange pixels found (adjust if needed)
-        rechenDetected = orangeCount >= 10;
+        // Rechen detected if at least 15 green pixels found (adjust if needed)
+        rechenDetected = greenCount >= 15;
       }
 
       function draw() {
@@ -81,17 +132,17 @@
         // Run rechen detection every frame
         detectRechen();
 
-        // Draw detected orange marker if rechen is found
+        // Draw detected green marker if rechen is found
         if (rechenDetected) {
           noFill();
-          stroke(255, 165, 0);
+          stroke(0, 200, 0);
           strokeWeight(3);
           rect(width - 44, 44, 34, 34, 4);
-          fill(255, 165, 0);
+          fill(0, 200, 0);
           noStroke();
           textSize(22);
           textAlign(CENTER, CENTER);
-          text("🪣", width - 27, 61); // small orange indicator in corner
+          text("🟢", width - 27, 61); // small green indicator in corner
         }
 
         // Draw keypoints and connections for each detected hand
@@ -144,12 +195,35 @@
 
         // Status bar: rechen
         noStroke();
-        fill(rechenDetected ? color(255, 140, 0, 200) : color(80, 80, 80, 180));
+        fill(rechenDetected ? color(0, 180, 0, 200) : color(80, 80, 80, 180));
         rect(0, 36, width, 36);
         fill(255);
         textSize(18);
         textAlign(LEFT, CENTER);
         text(rechenDetected ? "Rechen erkannt" : "Kein Rechen erkannt", 12, 54);
+
+        // --- ESP32 Serial triggers ---
+        let twoHands = hands.length >= 2;
+        let now = millis();
+
+        if (twoHands && !prevTwoHands && now - lastCPress > COOLDOWN) {
+          lastCPress = now;
+          sendSerial('C');
+        }
+        if (rechenDetected && !prevRechenDetected && now - lastDPress > COOLDOWN) {
+          lastDPress = now;
+          sendSerial('D');
+        }
+
+        prevTwoHands = twoHands;
+        prevRechenDetected = rechenDetected;
+
+        // Grüner Punkt = Serial verbunden
+        if (serialConnected) {
+          noStroke();
+          fill(0, 200, 0);
+          circle(width - 14, 14, 14);
+        }
       }
 
       // Callback function for when handPose outputs data
