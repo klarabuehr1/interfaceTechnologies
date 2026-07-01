@@ -14,8 +14,28 @@
       let handPose;
       let hands = [];
 
-      // Rechen detection state
+      // Game state: 'waiting' = warte auf Rechen-Hochheben, 'playing' = Spiel läuft
+      let gameState = 'waiting';
+      let waitingStartTime = 0;
+      const MIN_WAIT_MS = 2000; // Screen wird mindestens 2 Sek. angezeigt
+
+      // Rechen Farberkennung
       let rechenDetected = false;
+      let rechenCX = null;
+      let rechenCY = null;
+
+      // Centroid-Bewegungserkennung für Spielstart
+      // Prinzip: Centroid muss erst N Frames still sein (Referenz),
+      // dann wird auf Bewegung > Schwellwert geprüft.
+      let centroidHistory = [];
+      const CENTROID_HISTORY_LEN = 10;  // Frames für Glättung
+      let rechenStable = false;          // hat der Rechen lang genug still gelegen?
+      let stillFrames = 0;
+      const STILL_FRAMES_NEEDED = 25;   // ~0.8 Sek. Stille nötig bevor Bewegung geprüft wird
+      const STILL_THRESHOLD = 3;        // max. Pixel/Frame Bewegung = "still"
+      let refCX = null;
+      let refCY = null;
+      const MOVE_THRESHOLD = 20;        // Pixel Verschiebung von Referenz = "hochgehoben"
 
       // Web Serial API
       let serialWriter = null;
@@ -24,7 +44,7 @@
       // Edge-detection state (nur beim Übergang auslösen)
       let prevTwoHands = false;
       let prevRechenDetected = false;
-      const COOLDOWN = 1500; // ms zwischen wiederholten Triggern
+      const COOLDOWN = 1500;
       let lastCPress = -1500;
       let lastDPress = -1500;
 
@@ -57,22 +77,17 @@
       let connectBtn;
 
       function preload() {
-        // Load the handPose model
         handPose = ml5.handPose();
       }
 
       function setup() {
         createCanvas(640, 480);
-
-        // Create the video and hide it
+        waitingStartTime = millis();
         video = createCapture(VIDEO);
         video.size(640, 480);
         video.hide();
-
-        // Start detecting hands in the webcam video
         handPose.detectStart(video, gotHands);
 
-        // Connect button
         connectBtn = createButton('🔌 ESP32 verbinden');
         connectBtn.mousePressed(connectSerial);
         connectBtn.style('margin-top', '10px');
@@ -89,50 +104,177 @@
         let wrist    = hand.keypoints[0];
         let indexMCP = hand.keypoints[5];
         let pinkyMCP = hand.keypoints[17];
-
-        // 2D cross product (z-component)
         let crossZ = (indexMCP.x - wrist.x) * (pinkyMCP.y - wrist.y)
                    - (indexMCP.y - wrist.y) * (pinkyMCP.x - wrist.x);
-
-        // Webcam is mirrored → Left/Right is inverted
         let isRight = hand.handedness === "Left";
-
-        if (isRight) {
-          return crossZ > 0 ? "Außenfläche" : "Innenfläche";
-        } else {
-          return crossZ < 0 ? "Außenfläche" : "Innenfläche";
-        }
+        if (isRight) return crossZ > 0 ? "Außenfläche" : "Innenfläche";
+        else         return crossZ < 0 ? "Außenfläche" : "Innenfläche";
       }
 
-      // --- Rechen detection via orange pixel count ---
+      // Grüne Pixel zählen und Centroid berechnen
       function detectRechen() {
         video.loadPixels();
-        let greenCount = 0;
+        let count = 0;
+        let sumX = 0;
+        let sumY = 0;
 
-        // Sample every 4th pixel for performance
         for (let i = 0; i < video.pixels.length; i += 16) {
           let r = video.pixels[i];
           let g = video.pixels[i + 1];
           let b = video.pixels[i + 2];
-
-          // Green color filter
           if (g > 100 && g > r * 1.4 && g > b * 1.4 && r < 180 && b < 180) {
-            greenCount++;
+            count++;
+            let idx = i / 4;
+            sumX += idx % video.width;
+            sumY += Math.floor(idx / video.width);
           }
         }
 
-        // Rechen detected if at least 15 green pixels found (adjust if needed)
-        rechenDetected = greenCount >= 15;
+        rechenDetected = count >= 15;
+        if (rechenDetected) {
+          rechenCX = sumX / count;
+          rechenCY = sumY / count;
+        } else {
+          rechenCX = null;
+          rechenCY = null;
+        }
+      }
+
+      let currentAvgMove = 0;
+
+      function updateCentroidHistory() {
+        if (!rechenDetected) {
+          centroidHistory = [];
+          rechenStable = false;
+          stillFrames = 0;
+          refCX = null;
+          refCY = null;
+          currentAvgMove = 0;
+          return;
+        }
+
+        centroidHistory.push({ x: rechenCX, y: rechenCY });
+        if (centroidHistory.length > CENTROID_HISTORY_LEN) centroidHistory.shift();
+        if (centroidHistory.length < CENTROID_HISTORY_LEN) return;
+
+        let totalMove = 0;
+        for (let i = 1; i < centroidHistory.length; i++) {
+          let dx = centroidHistory[i].x - centroidHistory[i - 1].x;
+          let dy = centroidHistory[i].y - centroidHistory[i - 1].y;
+          totalMove += Math.sqrt(dx * dx + dy * dy);
+        }
+        currentAvgMove = totalMove / (centroidHistory.length - 1);
+      }
+
+      function checkRechenLift() {
+        if (!rechenDetected || centroidHistory.length < CENTROID_HISTORY_LEN) return false;
+
+        // Fall A: Delay abgelaufen + Rechen bewegt sich → direkt starten
+        if (millis() - waitingStartTime > MIN_WAIT_MS && currentAvgMove > STILL_THRESHOLD) {
+          return true;
+        }
+
+        // Fall B: Rechen liegt still → Referenz setzen, dann auf Bewegung warten
+        if (!rechenStable) {
+          if (currentAvgMove < STILL_THRESHOLD) {
+            stillFrames++;
+            if (stillFrames >= STILL_FRAMES_NEEDED) {
+              rechenStable = true;
+              refCX = rechenCX;
+              refCY = rechenCY;
+            }
+          } else {
+            stillFrames = 0;
+          }
+          return false;
+        }
+
+        let dx = rechenCX - refCX;
+        let dy = rechenCY - refCY;
+        return Math.sqrt(dx * dx + dy * dy) > MOVE_THRESHOLD;
       }
 
       function draw() {
-        // Draw the webcam video
         image(video, 0, 0, width, height);
-
-        // Run rechen detection every frame
         detectRechen();
+        updateCentroidHistory();
 
-        // Draw detected green marker if rechen is found
+        if (gameState === 'waiting') {
+          drawWaitingScreen();
+        } else {
+          drawPlayingScreen();
+        }
+
+        if (serialConnected) {
+          noStroke();
+          fill(0, 200, 0);
+          circle(width - 14, 14, 14);
+        }
+      }
+
+      function drawWaitingScreen() {
+        fill(0, 0, 0, 140);
+        noStroke();
+        rect(0, 0, width, height);
+
+        if (checkRechenLift()) {
+          gameState = 'playing';
+          centroidHistory = [];
+          rechenStable = false;
+          stillFrames = 0;
+          sendSerial('E');
+          return;
+        }
+
+        // Centroid + Stabilitätsanzeige (Debug-Hilfe beim Einrichten)
+        if (rechenDetected && rechenCX !== null) {
+          let col = rechenStable ? color(0, 255, 100) : color(255, 200, 0);
+          noFill();
+          stroke(col);
+          strokeWeight(2);
+          circle(rechenCX, rechenCY, 30);
+          if (refCX !== null) {
+            stroke(255, 80, 80);
+            strokeWeight(1);
+            line(refCX, refCY, rechenCX, rechenCY);
+          }
+        }
+
+        // Statustext
+        textAlign(CENTER, CENTER);
+        noStroke();
+        fill(255);
+        textSize(28);
+        text("Rechen hochheben", width / 2, height / 2 - 20);
+        textSize(18);
+        fill(200);
+        text("um das Spiel zu starten", width / 2, height / 2 + 20);
+
+        // Statusleiste unten
+        let statusText;
+        let statusColor;
+        if (!rechenDetected) {
+          statusText = "Kein Rechen erkannt";
+          statusColor = color(120, 120, 120, 200);
+        } else if (!rechenStable) {
+          let progress = Math.round((stillFrames / STILL_FRAMES_NEEDED) * 100);
+          statusText = "Rechen erkannt – kurz stillhalten… " + progress + "%";
+          statusColor = color(200, 140, 0, 200);
+        } else {
+          statusText = "Bereit – jetzt hochheben!";
+          statusColor = color(0, 180, 0, 200);
+        }
+
+        noStroke();
+        fill(statusColor);
+        rect(0, height - 40, width, 40);
+        fill(255);
+        textSize(16);
+        textAlign(LEFT, CENTER);
+        text(statusText, 12, height - 20);
+      }
+
+      function drawPlayingScreen() {
         if (rechenDetected) {
           noFill();
           stroke(0, 200, 0);
@@ -142,14 +284,11 @@
           noStroke();
           textSize(22);
           textAlign(CENTER, CENTER);
-          text("🟢", width - 27, 61); // small green indicator in corner
+          text("🟢", width - 27, 61);
         }
 
-        // Draw keypoints and connections for each detected hand
         for (let i = 0; i < hands.length; i++) {
           let hand = hands[i];
-
-          // Draw skeleton connections
           let connections = handPose.getConnections();
           for (let j = 0; j < connections.length; j++) {
             let ptA = hand.keypoints[connections[j][0]];
@@ -158,16 +297,12 @@
             strokeWeight(2);
             line(ptA.x, ptA.y, ptB.x, ptB.y);
           }
-
-          // Draw each keypoint
           for (let j = 0; j < hand.keypoints.length; j++) {
             let kp = hand.keypoints[j];
             fill(0, 255, 0);
             noStroke();
             circle(kp.x, kp.y, 8);
           }
-
-          // Show orientation label above the wrist
           let orientation = getHandOrientation(hand);
           let wrist = hand.keypoints[0];
           fill(orientation === "Innenfläche" ? color(0, 180, 255) : color(255, 140, 0));
@@ -179,21 +314,15 @@
           text(orientation, wrist.x, wrist.y - 24);
         }
 
-        // Status bar: hands
         let handsDetected = hands.length > 0;
-        let handText = handsDetected
-          ? "Hand(s) erkannt: " + hands.length
-          : "Keine Hand erkannt";
-
         noStroke();
         fill(handsDetected ? color(0, 200, 0, 180) : color(200, 0, 0, 180));
         rect(0, 0, width, 36);
         fill(255);
         textSize(18);
         textAlign(LEFT, CENTER);
-        text(handText, 12, 18);
+        text(handsDetected ? "Hand(s) erkannt: " + hands.length : "Keine Hand erkannt", 12, 18);
 
-        // Status bar: rechen
         noStroke();
         fill(rechenDetected ? color(0, 180, 0, 200) : color(80, 80, 80, 180));
         rect(0, 36, width, 36);
@@ -202,10 +331,8 @@
         textAlign(LEFT, CENTER);
         text(rechenDetected ? "Rechen erkannt" : "Kein Rechen erkannt", 12, 54);
 
-        // --- ESP32 Serial triggers ---
         let twoHands = hands.length >= 2;
         let now = millis();
-
         if (twoHands && !prevTwoHands && now - lastCPress > COOLDOWN) {
           lastCPress = now;
           sendSerial('C');
@@ -214,19 +341,10 @@
           lastDPress = now;
           sendSerial('D');
         }
-
         prevTwoHands = twoHands;
         prevRechenDetected = rechenDetected;
-
-        // Grüner Punkt = Serial verbunden
-        if (serialConnected) {
-          noStroke();
-          fill(0, 200, 0);
-          circle(width - 14, 14, 14);
-        }
       }
 
-      // Callback function for when handPose outputs data
       function gotHands(results) {
         hands = results;
       }
