@@ -11,6 +11,7 @@
   <body>
     <script>
       let video;
+      let canvasEl;
       let handPose;
       let hands = [];
       let cameraStatus = 'Kamera wird initialisiert...';
@@ -41,8 +42,17 @@
       const MOVE_THRESHOLD = 20;        // Pixel Verschiebung von Referenz = "hochgehoben"
 
       // Web Serial API
+      let serialPort = null;
       let serialWriter = null;
+      let serialReader = null;
       let serialConnected = false;
+      let serialReadLoopActive = false;
+      let lastSerialTx = '-';
+      let lastSerialRx = '-';
+      let lastSerialError = '-';
+      const SERIAL_BAUD_RATE = 115200;
+      const serialEncoder = new TextEncoder();
+      const serialDecoder = new TextDecoder();
 
       // Edge-detection state (nur beim Übergang auslösen)
       let prevTwoHands = false;
@@ -51,33 +61,100 @@
       let lastCPress = -1500;
       let lastDPress = -1500;
 
+      function sleepMs(ms) {
+        return new Promise((resolve) => setTimeout(resolve, ms));
+      }
+
+      async function startSerialReadLoop() {
+        if (!serialPort?.readable || serialReadLoopActive) return;
+
+        serialReadLoopActive = true;
+        let readBuffer = '';
+
+        while (serialConnected && serialPort?.readable) {
+          serialReader = serialPort.readable.getReader();
+
+          try {
+            while (true) {
+              const { value, done } = await serialReader.read();
+              if (done) break;
+              if (!value) continue;
+
+              readBuffer += serialDecoder.decode(value, { stream: true });
+              const lines = readBuffer.split(/\r?\n/);
+              readBuffer = lines.pop() || '';
+
+              for (const line of lines) {
+                const msg = line.trim();
+                if (!msg) continue;
+                lastSerialRx = msg;
+                console.log('ESP -> WEB:', msg);
+              }
+            }
+          } catch (e) {
+            lastSerialError = 'RX Fehler';
+            console.error('Lesen fehlgeschlagen:', e);
+          } finally {
+            if (serialReader) {
+              serialReader.releaseLock();
+              serialReader = null;
+            }
+          }
+
+          await sleepMs(40);
+        }
+
+        serialReadLoopActive = false;
+      }
+
       async function connectSerial() {
+        if (serialConnected) return;
+
         if (!navigator.serial) {
+          lastSerialError = 'Web Serial wird vom Browser nicht unterstuetzt (Chrome/Edge nutzen)';
           alert('Web Serial API nicht verfügbar. Bitte Chrome oder Edge verwenden.');
           return;
         }
         try {
-          const port = await navigator.serial.requestPort();
-          await port.open({ baudRate: 9600 });
-          const encoder = new TextEncoderStream();
-          encoder.readable.pipeTo(port.writable);
-          serialWriter = encoder.writable.getWriter();
+          connectBtn.html('⏳ Verbinde...');
+          serialPort = await navigator.serial.requestPort();
+          await serialPort.open({ baudRate: SERIAL_BAUD_RATE });
+          serialWriter = serialPort.writable.getWriter();
           serialConnected = true;
+          lastSerialError = '-';
+          startSerialReadLoop();
+
+          // Kurzer Ping zum Verbindungscheck im ESP-Log
+          await sendSerial('P');
+
           connectBtn.html('✅ ESP32 verbunden');
           connectBtn.style('background', '#2a9d2a');
         } catch (e) {
+          lastSerialError = 'Port öffnen fehlgeschlagen: ' + (e?.message || e);
+          connectBtn.html('🔌 ESP32 verbinden');
+          connectBtn.style('background', '#444');
           console.error('Serial Verbindung fehlgeschlagen:', e);
         }
       }
 
       async function sendSerial(char) {
-        if (serialWriter) {
-          try { await serialWriter.write(char); }
-          catch (e) { console.error('Senden fehlgeschlagen:', e); }
+        if (!serialWriter) {
+          lastSerialError = 'Nicht verbunden';
+          return;
+        }
+
+        try {
+          lastSerialTx = char;
+          await serialWriter.write(serialEncoder.encode(char + '\n'));
+        } catch (e) {
+          lastSerialError = 'TX Fehler';
+          console.error('Senden fehlgeschlagen:', e);
         }
       }
 
       let connectBtn;
+      let testCBtn;
+      let testDBtn;
 
       function preload() {
         handPose = ml5.handPose();
@@ -144,7 +221,7 @@
       }
 
       function setup() {
-        createCanvas(640, 480);
+        canvasEl = createCanvas(640, 480);
         waitingStartTime = millis();
         initializeVideo();
 
@@ -158,6 +235,32 @@
         connectBtn.style('border-radius', '6px');
         connectBtn.style('background', '#444');
         connectBtn.style('color', '#fff');
+        connectBtn.position(12, 12);
+
+        testCBtn = createButton('Test C senden');
+        testCBtn.mousePressed(() => sendSerial('C'));
+        testCBtn.style('margin-left', '10px');
+        testCBtn.style('padding', '8px 14px');
+        testCBtn.style('font-size', '14px');
+        testCBtn.style('cursor', 'pointer');
+        testCBtn.position(185, 12);
+
+        testDBtn = createButton('Test D senden');
+        testDBtn.mousePressed(() => sendSerial('D'));
+        testDBtn.style('margin-left', '8px');
+        testDBtn.style('padding', '8px 14px');
+        testDBtn.style('font-size', '14px');
+        testDBtn.style('cursor', 'pointer');
+        testDBtn.position(300, 12);
+
+        // Sicherstellen, dass Buttons immer ueber dem Canvas sichtbar bleiben.
+        const setControlsZIndex = (btn) => {
+          btn.style('position', 'fixed');
+          btn.style('z-index', '9999');
+        };
+        setControlsZIndex(connectBtn);
+        setControlsZIndex(testCBtn);
+        setControlsZIndex(testDBtn);
       }
 
       function getHandOrientation(hand) {
@@ -281,6 +384,8 @@
         if (cameraStatus !== 'OAK-D Lite verbunden') {
           drawCameraStatus();
         }
+
+        drawSerialStatus();
       }
 
       function drawCameraStatus() {
@@ -291,6 +396,25 @@
         textSize(14);
         textAlign(LEFT, CENTER);
         text(cameraStatus, 10, height - 14);
+      }
+
+      function drawSerialStatus() {
+        noStroke();
+        fill(0, 0, 0, 170);
+        rect(0, 72, width, 24);
+        fill(255);
+        textSize(13);
+        textAlign(LEFT, CENTER);
+
+        let status = 'TX: ' + lastSerialTx + ' | RX: ' + lastSerialRx;
+        if (!serialConnected) {
+          status += ' | Bitte auf ESP32 verbinden klicken';
+        }
+        if (lastSerialError !== '-') {
+          status += ' | ' + lastSerialError;
+        }
+
+        text(status, 10, 84);
       }
 
       function drawWaitingScreen() {
