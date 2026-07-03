@@ -13,6 +13,9 @@
       let video;
       let handPose;
       let hands = [];
+      let cameraStatus = 'Kamera wird initialisiert...';
+
+      const OAK_CAMERA_LABEL_PATTERN = /(oak|depthai|luxonis)/i;
 
       // Game state: 'waiting' = warte auf Rechen-Hochheben, 'playing' = Spiel läuft
       let gameState = 'waiting';
@@ -80,13 +83,70 @@
         handPose = ml5.handPose();
       }
 
+      async function findOakCameraDeviceId() {
+        if (!navigator.mediaDevices?.enumerateDevices) {
+          return null;
+        }
+
+        const devices = await navigator.mediaDevices.enumerateDevices();
+        const camera = devices.find(
+          (device) =>
+            device.kind === 'videoinput' && OAK_CAMERA_LABEL_PATTERN.test(device.label)
+        );
+
+        return camera?.deviceId ?? null;
+      }
+
+      async function initializeVideo() {
+        let permissionStream = null;
+
+        try {
+          permissionStream = await navigator.mediaDevices.getUserMedia({
+            video: true,
+            audio: false,
+          });
+
+          const oakDeviceId = await findOakCameraDeviceId();
+          permissionStream.getTracks().forEach((track) => track.stop());
+
+          const captureConstraints = oakDeviceId
+            ? {
+                audio: false,
+                video: {
+                  deviceId: { exact: oakDeviceId },
+                  width: 640,
+                  height: 480,
+                },
+              }
+            : {
+                audio: false,
+                video: {
+                  width: 640,
+                  height: 480,
+                },
+              };
+
+          cameraStatus = oakDeviceId
+            ? 'OAK-D Lite verbunden'
+            : 'OAK-D Lite nicht gefunden - Standardkamera aktiv';
+
+          video = createCapture(captureConstraints);
+          video.size(640, 480);
+          video.hide();
+          handPose.detectStart(video, gotHands);
+        } catch (error) {
+          if (permissionStream) {
+            permissionStream.getTracks().forEach((track) => track.stop());
+          }
+          cameraStatus = 'Kamerazugriff fehlgeschlagen';
+          console.error('Kamera konnte nicht initialisiert werden:', error);
+        }
+      }
+
       function setup() {
         createCanvas(640, 480);
         waitingStartTime = millis();
-        video = createCapture(VIDEO);
-        video.size(640, 480);
-        video.hide();
-        handPose.detectStart(video, gotHands);
+        initializeVideo();
 
         connectBtn = createButton('🔌 ESP32 verbinden');
         connectBtn.mousePressed(connectSerial);
@@ -195,6 +255,13 @@
       }
 
       function draw() {
+        background(0);
+
+        if (!video) {
+          drawCameraStatus();
+          return;
+        }
+
         image(video, 0, 0, width, height);
         detectRechen();
         updateCentroidHistory();
@@ -210,6 +277,20 @@
           fill(0, 200, 0);
           circle(width - 14, 14, 14);
         }
+
+        if (cameraStatus !== 'OAK-D Lite verbunden') {
+          drawCameraStatus();
+        }
+      }
+
+      function drawCameraStatus() {
+        noStroke();
+        fill(0, 0, 0, 160);
+        rect(0, height - 28, width, 28);
+        fill(255);
+        textSize(14);
+        textAlign(LEFT, CENTER);
+        text(cameraStatus, 10, height - 14);
       }
 
       function drawWaitingScreen() {
